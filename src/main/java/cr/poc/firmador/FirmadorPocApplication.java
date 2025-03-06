@@ -1,10 +1,11 @@
 package cr.poc.firmador;
 
 import cr.poc.firmador.card.CardSignInfo;
-import cr.poc.firmador.card.SmartCardDetector;
+import cr.poc.firmador.card.SmartCardManager;
 import cr.poc.firmador.sign.FirmadorPAdES;
 import eu.europa.esig.dss.model.DSSDocument;
 import eu.europa.esig.dss.model.FileDocument;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -14,9 +15,17 @@ import org.springframework.util.StringUtils;
 import java.io.File;
 import java.security.KeyStore;
 import java.util.List;
+import java.util.Optional;
 
 @SpringBootApplication
 public class FirmadorPocApplication {
+
+    private SmartCardManager smartCardManager;
+
+    @Autowired
+    public FirmadorPocApplication(SmartCardManager smartCardManager) {
+        this.smartCardManager = smartCardManager;
+    }
 
     public static void main(String[] args) {
         SpringApplication.run(FirmadorPocApplication.class, args);
@@ -62,20 +71,18 @@ public class FirmadorPocApplication {
     }
 
     private void listSmartCards(String... args) throws Throwable {
-        try (SmartCardDetector detector = new SmartCardDetector()) {
+        try {
             // Create detector with PIN
             String pin = args.length > 1 ? args[1] : null;
-            CardSignInfo pinInfo;
+            Optional<KeyStore.PasswordProtection> keyStorePasswordProtection = Optional.empty();
 
             if (StringUtils.hasText(pin)) {
-                pinInfo = new CardSignInfo(new KeyStore.PasswordProtection(pin.toCharArray()));
-            } else {
-                pinInfo = new CardSignInfo();
+                keyStorePasswordProtection = Optional.of(new KeyStore.PasswordProtection(pin.toCharArray()));
             }
 
 
             // Get available cards
-            List<CardSignInfo> cards = detector.readSaveListSmartCard(pinInfo);
+            List<CardSignInfo> cards = smartCardManager.readCertificatesInfo(keyStorePasswordProtection);
 
             if (cards.isEmpty()) {
                 System.out.println("No smart cards detected");
@@ -134,10 +141,9 @@ public class FirmadorPocApplication {
             return;
         }
 
-        try (SmartCardDetector detector = new SmartCardDetector()) {
+        try {
             // Get available cards
-            CardSignInfo pinInfo = new CardSignInfo(new KeyStore.PasswordProtection(pin.toCharArray()));
-            List<CardSignInfo> cards = detector.readSaveListSmartCard(pinInfo);
+            List<CardSignInfo> cards = smartCardManager.readCertificatesInfo(Optional.of(new KeyStore.PasswordProtection(pin.toCharArray())));
 
             if (cards.isEmpty()) {
                 System.out.println("No smart cards detected");

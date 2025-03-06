@@ -18,9 +18,11 @@ public class CardSignInfo {
 
     final Logger LOG = LogManager.getLogger(MethodHandles.lookup().lookupClass());
 
+    //Estos deberian ser un enum
     public static int PKCS11TYPE = 1;
     public static int PKCS12TYPE = 2;
     public static int ONLYPIN = 3;
+
     private String identification;
     private String firstName;
     private String lastName;

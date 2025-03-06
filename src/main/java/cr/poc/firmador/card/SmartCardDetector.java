@@ -6,16 +6,24 @@ import cr.poc.firmador.exception.UnsupportedArchitectureException;
 import cr.poc.firmador.settings.Settings;
 import cr.poc.firmador.settings.SettingsManager;
 import cr.poc.firmador.sign.CRSigner;
+import eu.europa.esig.dss.model.x509.X500PrincipalHelper;
+import eu.europa.esig.dss.spi.DSSASN1Utils;
+import jakarta.annotation.PreDestroy;
+import jakarta.xml.bind.DatatypeConverter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.bouncycastle.asn1.x500.style.BCStyle;
+import org.springframework.stereotype.Component;
 
 import javax.naming.ldap.LdapName;
 import javax.naming.ldap.Rdn;
+import javax.security.auth.x500.X500Principal;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
@@ -26,10 +34,10 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
 
+@Component
 public class SmartCardDetector implements AutoCloseable {
     final Logger LOG = LogManager.getLogger(MethodHandles.lookup().lookupClass());
     protected Settings settings = SettingsManager.getInstance().getAndCreateSettings();
@@ -46,41 +54,43 @@ public class SmartCardDetector implements AutoCloseable {
         this.libraryPath = libraryPath;
     }
 
-
     public void updateLib() {
         this.libraryPath = CRSigner.getPkcs11Lib();
     }
 
-    public List<CardSignInfo> readSaveListSmartCard(CardSignInfo pinInfo) throws Throwable {
-        List<CardSignInfo> cards = Collections.emptyList();
-        try {
-            if (pinInfo != null && pinInfo.getPin() != null) {
-                // If PIN is provided, use readListSmartCard
-                cards = this.readListSmartCard(pinInfo);
-            } else {
-                // If no PIN is provided, use readPublicCertificateInfo
-                cards = readPublicCertificateInfo();
-            }
-        } catch (Throwable e) {
-            this.LOG.info("readListSmartCard thrown", e);
-            if (e.getMessage().toString().contains("incompatible architecture")) {
-                throw new UnsupportedArchitectureException("Java para ARM detectado. Debe instalar Java para Intel para usar tarjetas de Firma Digital.", e);
-            }
-            cards = new ArrayList();
-        }
+//    public List<CardSignInfo> readSaveListSmartCard(CardSignInfo pinInfo) throws Throwable {
+//        List<CardSignInfo> cards = new ArrayList();
+//        try {
+//            if (pinInfo != null && pinInfo.getPin() != null) {
+//                // If PIN is provided, use readListSmartCard
+//                cards = this.readPrivateCertsWithLogin(pinInfo.getPin());
+//            } else {
+//                // If no PIN is provided, use readPublicCertificateInfo
+//                cards = readPublicCertificatesInfo();
+//            }
+//        } catch (Throwable e) {
+//            //Fallback, en caso de errores
+//            this.LOG.info("readListSmartCard thrown", e);
+//            if (e.getMessage().toString().contains("incompatible architecture")) {
+//                throw new UnsupportedArchitectureException("Java para ARM detectado. Debe instalar Java para Intel para usar tarjetas de Firma Digital.", e);
+//            }
+//        }
+//
+//        //Este brete se hace para insertar certificados configurados a nivel de sistema que se puedan usar
+//        //pra las firmas, es decir, se basa meramente en software, no se interactua con las tarjetas
+//        //Entonces puede apuntar a una lista con absolute file paths a certificados
+//        for (String pkcs12 : this.settings.pKCS12File) {
+//            File f = new File(pkcs12);
+//            if (f.exists()) {
+//                cards.add(new CardSignInfo(CardSignInfo.PKCS12TYPE, pkcs12, f.getName()));
+//            }
+//        }
+//
+//        return cards;
+//    }
 
-        for (String pkcs12 : this.settings.pKCS12File) {
-            File f = new File(pkcs12);
-            if (f.exists()) {
-                cards.add(new CardSignInfo(CardSignInfo.PKCS12TYPE, pkcs12, f.getName()));
-            }
-        }
-
-        return cards;
-    }
-
-    public List<CardSignInfo> readListSmartCard(CardSignInfo pinInfo) throws Exception {
-        List<CardSignInfo> cardInfo = new ArrayList<>();
+    public List<CardSignInfo> readPrivateCertsWithLogin(KeyStore.PasswordProtection pinInfo) throws Exception {
+        List<CardSignInfo> cardsPrivateInfo = new ArrayList<>();
 
         try {
             // Debug: List available providers
@@ -105,10 +115,9 @@ public class SmartCardDetector implements AutoCloseable {
 
             try {
                 // Handle PIN
-                char[] pin = (pinInfo != null && pinInfo.getPin() != null) ? pinInfo.getPin().getPassword() : null;
 
                 // Load the keystore with PIN
-                keyStore.load(null, pin);
+                keyStore.load(null, pinInfo.getPassword());
 
                 // Process certificates
                 Enumeration<String> aliases = keyStore.aliases();
@@ -118,7 +127,7 @@ public class SmartCardDetector implements AutoCloseable {
                         Certificate cert = keyStore.getCertificate(alias);
                         if (cert instanceof X509Certificate) {
                             X509Certificate x509Cert = (X509Certificate) cert;
-                            processX509Certificate(x509Cert, cardInfo);
+                            processX509Certificate(x509Cert, cardsPrivateInfo);
                         }
                     } catch (Exception e) {
                         LOG.warn("Error processing certificate for alias " + alias + ": " + e.getMessage());
@@ -129,7 +138,7 @@ public class SmartCardDetector implements AutoCloseable {
             } catch (Exception e) {
                 if (e.getMessage() != null && (e.getMessage().contains("CKR_PIN_REQUIRED") || e.getMessage().contains("token login required"))) {
                     LOG.debug("PIN required for this operation");
-                    return cardInfo;
+                    return cardsPrivateInfo;
                 }
                 throw e;
             }
@@ -137,10 +146,80 @@ public class SmartCardDetector implements AutoCloseable {
         } catch (Exception e) {
             LOG.error("Error reading smart card: " + e.getMessage(), e);
             throw e;
+        } catch (Throwable e) {
+            //Fallback, en caso de errores
+            this.LOG.info("readPrivateCertsWithLogin thrown", e);
+            if (e.getMessage().toString().contains("incompatible architecture")) {
+                throw new UnsupportedArchitectureException("Java para ARM detectado. Debe instalar Java para Intel para usar tarjetas de Firma Digital.", e);
+            }
         }
 
-        return cardInfo;
+        //Este brete se hace para insertar certificados configurados a nivel de sistema que se puedan usar
+        //pra las firmas, es decir, se basa meramente en software, no se interactua con las tarjetas
+        //Entonces puede apuntar a una lista con absolute file paths a certificados
+        for (String pkcs12 : this.settings.pKCS12File) {
+            File f = new File(pkcs12);
+            if (f.exists()) {
+                cardsPrivateInfo.add(new CardSignInfo(CardSignInfo.PKCS12TYPE, pkcs12, f.getName()));
+            }
+        }
+
+        return cardsPrivateInfo;
     }
+
+    public List<CardSignInfo> readPublicCertificatesInfo() throws Exception {
+        List<CardSignInfo> cardsPublicInfo = new ArrayList<>();
+        PKCS11Native pkcs11 = PKCS11Native.INSTANCE;
+
+        try {
+            // Initialize PKCS11
+            long rv = pkcs11.C_Initialize(null);
+            if (rv != 0) {
+                throw new Exception("Failed to initialize PKCS11 library: " + rv);
+            }
+
+            try {
+                // Get slots with tokens present
+                LongByReference slotCount = new LongByReference();
+                rv = pkcs11.C_GetSlotList(true, null, slotCount);
+                if (rv != 0) {
+                    throw new Exception("Failed to get slot count: " + rv);
+                }
+
+                long[] slots = new long[(int) slotCount.getValue()];
+                rv = pkcs11.C_GetSlotList(true, slots, slotCount);
+                if (rv != 0) {
+                    throw new Exception("Failed to get slot list: " + rv);
+                }
+
+                // Process each slot
+                for (long slot : slots) {
+                    processSlot(pkcs11, slot, cardsPublicInfo);
+                }
+            } finally {
+                pkcs11.C_Finalize(null);
+            }
+        } catch (Throwable e) {
+            //Fallback, en caso de errores
+            this.LOG.info("readPrivateCertsWithLogin thrown", e);
+            if (e.getMessage().toString().contains("incompatible architecture")) {
+                throw new UnsupportedArchitectureException("Java para ARM detectado. Debe instalar Java para Intel para usar tarjetas de Firma Digital.", e);
+            }
+        }
+
+        //Este brete se hace para insertar certificados configurados a nivel de sistema que se puedan usar
+        //pra las firmas, es decir, se basa meramente en software, no se interactua con las tarjetas
+        //Entonces puede apuntar a una lista con absolute file paths a certificados
+        for (String pkcs12 : this.settings.pKCS12File) {
+            File f = new File(pkcs12);
+            if (f.exists()) {
+                cardsPublicInfo.add(new CardSignInfo(CardSignInfo.PKCS12TYPE, pkcs12, f.getName()));
+            }
+        }
+
+        return cardsPublicInfo;
+    }
+
 
     private File createConfigFile(String libraryPath) throws IOException {
         String config = String.format("""
@@ -208,62 +287,22 @@ public class SmartCardDetector implements AutoCloseable {
                 // Get token information
                 String serialNumber = certificate.getSerialNumber().toString(16);
 
-                // Create CardSignInfo object
-                // Note: Some information like slot ID and token serial number
-                // might need to be obtained differently with JCA
-
-                //aqui lo que falta resolver es el slot ID y el serial number, esos son requeridos
-//                new CardSignInfo(CardSignInfo.PKCS11TYPE, identification, firstName, lastName, commonName, organization, expires,
-//                        certificate.getSerialNumber().toString(16), new String(tokenInfo.serialNumber), slotID);
+                // Note: The information for slot ID and token serial number
+                // need to be obtained differently with JCA since it's abstracted from these higher level API implementations.
+                // For signing with PKCS11 we do not need these details.
 
 
-                CardSignInfo info = new CardSignInfo(CardSignInfo.PKCS11TYPE, identification, firstName, lastName, commonName, organization, expires, serialNumber, "Unknown", // Token serial number needs different approach
-                        0L        // Slot ID needs different approach
-                );
+                //IMPORTANTE: EL SLOT ID SI SE NECESITA.
+                CardSignInfo info = new CardSignInfo(CardSignInfo.PKCS11TYPE, identification, firstName, lastName, commonName,
+                        organization, expires, serialNumber, "Unknown", 0L);
 
                 cardInfo.add(info);
-
                 LOG.info(String.format("%s %s (%s), %s, %s (Expires: %s)", firstName, lastName, identification, organization, serialNumber, expires));
             }
 
         } catch (Exception e) {
             LOG.error("Error processing certificate: " + e.getMessage());
         }
-    }
-
-    private List<CardSignInfo> readPublicCertificateInfo() throws Exception {
-        List<CardSignInfo> cards = new ArrayList<>();
-        PKCS11Native pkcs11 = PKCS11Native.INSTANCE;
-
-        // Initialize PKCS11
-        long rv = pkcs11.C_Initialize(null);
-        if (rv != 0) {
-            throw new Exception("Failed to initialize PKCS11 library: " + rv);
-        }
-
-        try {
-            // Get slots with tokens present
-            LongByReference slotCount = new LongByReference();
-            rv = pkcs11.C_GetSlotList(true, null, slotCount);
-            if (rv != 0) {
-                throw new Exception("Failed to get slot count: " + rv);
-            }
-
-            long[] slots = new long[(int) slotCount.getValue()];
-            rv = pkcs11.C_GetSlotList(true, slots, slotCount);
-            if (rv != 0) {
-                throw new Exception("Failed to get slot list: " + rv);
-            }
-
-            // Process each slot
-            for (long slot : slots) {
-                processSlot(pkcs11, slot, cards);
-            }
-        } finally {
-            pkcs11.C_Finalize(null);
-        }
-
-        return cards;
     }
 
     private void processSlot(PKCS11Native pkcs11, long slot, List<CardSignInfo> cards) {
@@ -330,7 +369,7 @@ public class SmartCardDetector implements AutoCloseable {
             if (certBytes == null) return;
 
             X509Certificate cert = (X509Certificate) CertificateFactory.getInstance("X.509")
-                .generateCertificate(new ByteArrayInputStream(certBytes));
+                    .generateCertificate(new ByteArrayInputStream(certBytes));
 
             // Only process non-CA certificates with digital signature usage
             if (cert.getBasicConstraints() != -1) return;
@@ -339,59 +378,76 @@ public class SmartCardDetector implements AutoCloseable {
             if (keyUsage == null || !keyUsage[0] || !keyUsage[1]) return;
 
             // Extract certificate information and create CardSignInfo
-            LdapName ldapName = new LdapName(cert.getSubjectX500Principal().getName());
+//            LdapName ldapName = new LdapName(cert.getSubjectX500Principal().getName());
+            X500Principal subject = cert.getSubjectX500Principal();
             String firstName = "", lastName = "", identification = "", commonName = "", organization = "";
+
+            // First try direct X500Principal parsing
+            String dn = subject.getName(X500Principal.RFC2253);
+            LdapName ldapName = new LdapName(dn);
 
             for (Rdn rdn : ldapName.getRdns()) {
                 String type = rdn.getType().toLowerCase();
-                String value = rdn.getValue().toString();
-                
+                Object value = rdn.getValue();
+
+                // Handle byte arrays and other encoded values
+                String strValue = parseRdnValue(value);
+
                 switch (type) {
-                    // Handle both OID and common name formats
                     case "oid.2.5.4.42":
+                    case "2.5.4.42":
                     case "givenname":
-                        firstName = value;
+                        firstName = strValue;
                         break;
-                        
+
                     case "oid.2.5.4.4":
+                    case "2.5.4.4":
                     case "surname":
-                        lastName = value;
+                        lastName = strValue;
                         break;
-                        
+
                     case "oid.2.5.4.5":
+                    case "2.5.4.5":
                     case "serialnumber":
-                        identification = value;
+                        identification = strValue;
                         break;
-                        
+
                     case "cn":
                     case "oid.2.5.4.3":
-                        commonName = value;
+                    case "2.5.4.3":
+                        commonName = strValue;
                         break;
-                        
+
                     case "o":
                     case "oid.2.5.4.10":
-                        organization = value;
+                    case "2.5.4.10":
+                        organization = strValue;
                         break;
-                        
+
                     default:
-                        LOG.debug("Unhandled certificate attribute - Type: {}, Value: {}", type, value);
+                        LOG.debug("Unhandled certificate attribute - Type: {}, Value: {}", type, strValue);
                 }
+            }
+
+            // If identification is still empty, try getting it directly from the certificate
+            if (identification.isEmpty()) {
+                identification = DSSASN1Utils.extractAttributeFromX500Principal(BCStyle.SERIALNUMBER, new X500PrincipalHelper(subject));
             }
 
             SimpleDateFormat dateFormat = new SimpleDateFormat("dd/MM/yyyy");
             String expires = dateFormat.format(cert.getNotAfter());
 
             cards.add(new CardSignInfo(
-                CardSignInfo.PKCS11TYPE,
-                identification,
-                firstName,
-                lastName,
-                commonName,
-                organization,
-                expires,
-                cert.getSerialNumber().toString(16),
-                tokenSerial,
-                slot
+                    CardSignInfo.PKCS11TYPE,
+                    identification,
+                    firstName,
+                    lastName,
+                    commonName,
+                    organization,
+                    expires,
+                    cert.getSerialNumber().toString(16),
+                    tokenSerial,
+                    slot
             ));
 
         } catch (Exception e) {
@@ -437,8 +493,23 @@ public class SmartCardDetector implements AutoCloseable {
         LOG.debug("===================================");
     }
 
+    private String parseRdnValue(Object value) {
+        if (value instanceof byte[]) {
+            return new String((byte[]) value, StandardCharsets.UTF_8);
+        } else if (value instanceof String) {
+            String strValue = (String) value;
+            // Remove any hex encoding if present
+            if (strValue.startsWith("#")) {
+                byte[] bytes = DatatypeConverter.parseHexBinary(strValue.substring(1));
+                return new String(bytes, StandardCharsets.UTF_8);
+            }
+            return strValue;
+        }
+        return value.toString();
+    }
 
     @Override
+    @PreDestroy
     public void close() {
         if (provider != null) {
             Security.removeProvider(provider.getName());

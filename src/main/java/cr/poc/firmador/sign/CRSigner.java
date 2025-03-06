@@ -84,7 +84,7 @@ public class CRSigner {
     public static String getPkcs11Lib() {
         String osName = System.getProperty("os.name").toLowerCase();
         Settings settings = SettingsManager.getInstance().getAndCreateSettings();
-        
+
         if (settings.extraPKCS11Lib != null && !settings.extraPKCS11Lib.isEmpty()) {
             return settings.extraPKCS11Lib;
         } else if (osName.contains("mac")) {
@@ -92,8 +92,8 @@ public class CRSigner {
         } else if (osName.contains("linux")) {
             return "/usr/lib/x64-athena/libASEP11.so";
         } else {
-            return osName.contains("windows") ? 
-                System.getenv("SystemRoot") + "\\System32\\asepkcs.dll" : "";
+            return osName.contains("windows") ?
+                    System.getenv("SystemRoot") + "\\System32\\asepkcs.dll" : "";
         }
     }
 
@@ -102,6 +102,7 @@ public class CRSigner {
 
         try {
             if (card.getCardType() == CardSignInfo.PKCS12TYPE) {
+                // In this case the CardSignInfo.getTokenSerialNumber actually has a file absolute path to an PKCS12 key store
                 signingToken = new Pkcs12SignatureToken(card.getTokenSerialNumber(), card.getPin());
             } else {
                 signingToken = new Pkcs11SignatureToken(getPkcs11Lib(), card.getPin(), (int) card.getSlotID());
@@ -130,13 +131,13 @@ public class CRSigner {
         listAvailableCertificates();
 
         CertificateSource trustedCertSource = new CommonTrustedCertificateSource();
-        
+
         // Add root certificates
         addCertificateToSource(trustedCertSource, "certs/CA RAIZ NACIONAL - COSTA RICA v2.crt");
         addCertificateToSource(trustedCertSource, "certs/CA RAIZ NACIONAL COSTA RICA.cer");
 
         CertificateSource adjunctCertSource = new CommonCertificateSource();
-        
+
         // Add intermediate certificates
         addCertificateToSource(adjunctCertSource, "certs/CA POLITICA PERSONA FISICA - COSTA RICA v2.crt");
         addCertificateToSource(adjunctCertSource, "certs/CA POLITICA PERSONA JURIDICA - COSTA RICA v2.crt");
