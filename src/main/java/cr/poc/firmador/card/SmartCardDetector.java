@@ -1,5 +1,7 @@
 package cr.poc.firmador.card;
 
+import com.sun.jna.Memory;
+import com.sun.jna.ptr.LongByReference;
 import cr.poc.firmador.exception.UnsupportedArchitectureException;
 import cr.poc.firmador.settings.Settings;
 import cr.poc.firmador.settings.SettingsManager;
@@ -9,21 +11,24 @@ import org.apache.logging.log4j.Logger;
 
 import javax.naming.ldap.LdapName;
 import javax.naming.ldap.Rdn;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.Provider;
 import java.security.Security;
 import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
-import java.nio.file.Files;
-import java.nio.file.Path;
 
 public class SmartCardDetector implements AutoCloseable {
     final Logger LOG = LogManager.getLogger(MethodHandles.lookup().lookupClass());
@@ -47,9 +52,15 @@ public class SmartCardDetector implements AutoCloseable {
     }
 
     public List<CardSignInfo> readSaveListSmartCard(CardSignInfo pinInfo) throws Throwable {
-        List<CardSignInfo> cards;
+        List<CardSignInfo> cards = Collections.emptyList();
         try {
-            cards = this.readListSmartCard(pinInfo, true);
+            if (pinInfo != null && pinInfo.getPin() != null) {
+                // If PIN is provided, use readListSmartCard
+                cards = this.readListSmartCard(pinInfo);
+            } else {
+                // If no PIN is provided, use readPublicCertificateInfo
+                cards = readPublicCertificateInfo();
+            }
         } catch (Throwable e) {
             this.LOG.info("readListSmartCard thrown", e);
             if (e.getMessage().toString().contains("incompatible architecture")) {
@@ -68,57 +79,59 @@ public class SmartCardDetector implements AutoCloseable {
         return cards;
     }
 
-
-    public List<CardSignInfo> readListSmartCard(CardSignInfo pinInfo, boolean requirePin) throws Exception {
+    public List<CardSignInfo> readListSmartCard(CardSignInfo pinInfo) throws Exception {
         List<CardSignInfo> cardInfo = new ArrayList<>();
 
         try {
-            // Remove any escape characters from the library path
-            String cleanLibPath = libraryPath.replace("\\ ", " ");
+            // Debug: List available providers
+            listAvailableProviders();
 
-            // Verify library file exists
+            String cleanLibPath = libraryPath.replace("\\ ", " ");
             File libFile = new File(cleanLibPath);
             if (!libFile.exists()) {
                 throw new Exception("PKCS11 library not found: " + cleanLibPath);
             }
 
-            // Create temporary config file
             configFile = createConfigFile(cleanLibPath);
-
-            // Get the SunPKCS11 provider
             provider = Security.getProvider("SunPKCS11");
             if (provider == null) {
                 throw new Exception("SunPKCS11 provider not available");
             }
 
-            // Configure provider using the config file
             provider = provider.configure(configFile.getAbsolutePath());
             Security.addProvider(provider);
 
-            // Initialize KeyStore
             keyStore = KeyStore.getInstance("PKCS11", provider);
 
-            if (requirePin && pinInfo != null && pinInfo.getPin() != null) {
-                keyStore.load(null, pinInfo.getPin().getPassword());
-            } else {
-                keyStore.load(null, null);
-            }
+            try {
+                // Handle PIN
+                char[] pin = (pinInfo != null && pinInfo.getPin() != null) ? pinInfo.getPin().getPassword() : null;
 
-            // Process certificates
-            Enumeration<String> aliases = keyStore.aliases();
-            while (aliases.hasMoreElements()) {
-                String alias = aliases.nextElement();
-                
-                try {
-                    Certificate cert = keyStore.getCertificate(alias);
-                    if (cert instanceof X509Certificate) {
-                        X509Certificate x509Cert = (X509Certificate) cert;
-                        processX509Certificate(x509Cert, cardInfo);
+                // Load the keystore with PIN
+                keyStore.load(null, pin);
+
+                // Process certificates
+                Enumeration<String> aliases = keyStore.aliases();
+                while (aliases.hasMoreElements()) {
+                    String alias = aliases.nextElement();
+                    try {
+                        Certificate cert = keyStore.getCertificate(alias);
+                        if (cert instanceof X509Certificate) {
+                            X509Certificate x509Cert = (X509Certificate) cert;
+                            processX509Certificate(x509Cert, cardInfo);
+                        }
+                    } catch (Exception e) {
+                        LOG.warn("Error processing certificate for alias " + alias + ": " + e.getMessage());
+                        continue;
                     }
-                } catch (Exception e) {
-                    LOG.warn("Error processing certificate for alias " + alias + ": " + e.getMessage());
-                    continue;
                 }
+
+            } catch (Exception e) {
+                if (e.getMessage() != null && (e.getMessage().contains("CKR_PIN_REQUIRED") || e.getMessage().contains("token login required"))) {
+                    LOG.debug("PIN required for this operation");
+                    return cardInfo;
+                }
+                throw e;
             }
 
         } catch (Exception e) {
@@ -157,15 +170,11 @@ public class SmartCardDetector implements AutoCloseable {
             boolean[] keyUsage = certificate.getKeyUsage();
 
             // Check if certificate is for signing
-            if (certificate.getBasicConstraints() == -1 &&
-                    keyUsage != null &&
-                    keyUsage[0] && // digitalSignature
+            if (certificate.getBasicConstraints() == -1 && keyUsage != null && keyUsage[0] && // digitalSignature
                     keyUsage[1])   // nonRepudiation
             {
                 // Parse certificate subject
-                LdapName ldapName = new LdapName(
-                        certificate.getSubjectX500Principal().getName("RFC1779")
-                );
+                LdapName ldapName = new LdapName(certificate.getSubjectX500Principal().getName("RFC1779"));
 
                 String firstName = "";
                 String lastName = "";
@@ -194,8 +203,7 @@ public class SmartCardDetector implements AutoCloseable {
                     }
                 }
 
-                String expires = new SimpleDateFormat("yyyy-MM-dd")
-                        .format(certificate.getNotAfter());
+                String expires = new SimpleDateFormat("yyyy-MM-dd").format(certificate.getNotAfter());
 
                 // Get token information
                 String serialNumber = certificate.getSerialNumber().toString(16);
@@ -209,25 +217,13 @@ public class SmartCardDetector implements AutoCloseable {
 //                        certificate.getSerialNumber().toString(16), new String(tokenInfo.serialNumber), slotID);
 
 
-                CardSignInfo info = new CardSignInfo(
-                        CardSignInfo.PKCS11TYPE, identification,
-                        firstName,
-                        lastName,
-                        commonName,
-                        organization,
-                        expires,
-                        serialNumber,
-                        "Unknown", // Token serial number needs different approach
+                CardSignInfo info = new CardSignInfo(CardSignInfo.PKCS11TYPE, identification, firstName, lastName, commonName, organization, expires, serialNumber, "Unknown", // Token serial number needs different approach
                         0L        // Slot ID needs different approach
                 );
 
                 cardInfo.add(info);
 
-                LOG.info(String.format(
-                        "%s %s (%s), %s, %s (Expires: %s)",
-                        firstName, lastName, identification,
-                        organization, serialNumber, expires
-                ));
+                LOG.info(String.format("%s %s (%s), %s, %s (Expires: %s)", firstName, lastName, identification, organization, serialNumber, expires));
             }
 
         } catch (Exception e) {
@@ -235,12 +231,212 @@ public class SmartCardDetector implements AutoCloseable {
         }
     }
 
-    // Method to get token information (implementation depends on your needs)
-    private String getTokenSerialNumber() throws Exception {
-        // This would need to be implemented using PKCS11 provider-specific calls
-        // or through JCA security properties
-        return "Unknown";
+    private List<CardSignInfo> readPublicCertificateInfo() throws Exception {
+        List<CardSignInfo> cards = new ArrayList<>();
+        PKCS11Native pkcs11 = PKCS11Native.INSTANCE;
+
+        // Initialize PKCS11
+        long rv = pkcs11.C_Initialize(null);
+        if (rv != 0) {
+            throw new Exception("Failed to initialize PKCS11 library: " + rv);
+        }
+
+        try {
+            // Get slots with tokens present
+            LongByReference slotCount = new LongByReference();
+            rv = pkcs11.C_GetSlotList(true, null, slotCount);
+            if (rv != 0) {
+                throw new Exception("Failed to get slot count: " + rv);
+            }
+
+            long[] slots = new long[(int) slotCount.getValue()];
+            rv = pkcs11.C_GetSlotList(true, slots, slotCount);
+            if (rv != 0) {
+                throw new Exception("Failed to get slot list: " + rv);
+            }
+
+            // Process each slot
+            for (long slot : slots) {
+                processSlot(pkcs11, slot, cards);
+            }
+        } finally {
+            pkcs11.C_Finalize(null);
+        }
+
+        return cards;
     }
+
+    private void processSlot(PKCS11Native pkcs11, long slot, List<CardSignInfo> cards) {
+        // Get token info
+        PKCS11Native.TokenInfo tokenInfo = new PKCS11Native.TokenInfo();
+        long rv = pkcs11.C_GetTokenInfo(slot, tokenInfo);
+        if (rv != 0) {
+            LOG.warn("Failed to get token info for slot " + slot);
+            return;
+        }
+
+        String serialNumber = new String(tokenInfo.serialNumber).trim();
+        String label = new String(tokenInfo.label).trim();
+        String model = new String(tokenInfo.model).trim();
+
+        LOG.info("Processing token - Serial: {}, Label: {}, Model: {}", serialNumber, label, model);
+
+        // Open read-only session (no login required)
+        LongByReference session = new LongByReference();
+        rv = pkcs11.C_OpenSession(slot, PKCS11Native.CKF_SERIAL_SESSION, null, null, session);
+        if (rv != 0) {
+            LOG.warn("Failed to open session on slot " + slot);
+            return;
+        }
+
+        try {
+            readCertificatesFromSession(pkcs11, session.getValue(), slot, serialNumber, cards);
+        } finally {
+            pkcs11.C_CloseSession(session.getValue());
+        }
+    }
+
+    private void readCertificatesFromSession(PKCS11Native pkcs11, long session, long slot, String tokenSerial, List<CardSignInfo> cards) {
+        // Find X.509 certificates
+        PKCS11Native.CKAttribute[] template = PKCS11Native.CKAttribute.createTemplate(new PKCS11Native.CKAttribute(PKCS11Native.CKA_CLASS, PKCS11Native.CKO_CERTIFICATE), new PKCS11Native.CKAttribute(PKCS11Native.CKA_CERTIFICATE_TYPE, PKCS11Native.CKC_X_509));
+
+        long rv = pkcs11.C_FindObjectsInit(session, template, template.length);
+        if (rv != 0) {
+            LOG.warn("Failed to initialize object finding");
+            return;
+        }
+
+        try {
+            long[] objects = new long[32];
+            LongByReference count = new LongByReference();
+
+            rv = pkcs11.C_FindObjects(session, objects, objects.length, count);
+            if (rv != 0) {
+                LOG.warn("Failed to find objects");
+                return;
+            }
+
+            for (int i = 0; i < count.getValue(); i++) {
+                processCertificate(pkcs11, session, objects[i], slot, tokenSerial, cards);
+            }
+        } finally {
+            pkcs11.C_FindObjectsFinal(session);
+        }
+    }
+
+    private void processCertificate(PKCS11Native pkcs11, long session, long object, long slot, String tokenSerial, List<CardSignInfo> cards) {
+        try {
+            byte[] certBytes = getCertificateBytes(pkcs11, session, object);
+            if (certBytes == null) return;
+
+            X509Certificate cert = (X509Certificate) CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(certBytes));
+
+            // Only process non-CA certificates with digital signature usage
+            if (cert.getBasicConstraints() != -1) return;
+
+            boolean[] keyUsage = cert.getKeyUsage();
+            if (keyUsage == null || !keyUsage[0] || !keyUsage[1]) return;
+
+            // Extract certificate information and create CardSignInfo
+            LdapName ldapName = new LdapName(cert.getSubjectX500Principal().getName());
+            String firstName = "", lastName = "", identification = "", commonName = "", organization = "";
+
+            for (Rdn rdn : ldapName.getRdns()) {
+                String type = rdn.getType().toLowerCase();
+                String value = rdn.getValue().toString();
+                
+                switch (type) {
+                    // Handle both OID and common name formats
+                    case "oid.2.5.4.42":
+                    case "givenname":
+                        firstName = value;
+                        break;
+                        
+                    case "oid.2.5.4.4":
+                    case "surname":
+                        lastName = value;
+                        break;
+                        
+                    case "oid.2.5.4.5":
+                    case "serialnumber":
+                        identification = value;
+                        break;
+                        
+                    case "cn":
+                    case "oid.2.5.4.3":
+                        commonName = value;
+                        break;
+                        
+                    case "o":
+                    case "oid.2.5.4.10":
+                        organization = value;
+                        break;
+                        
+                    default:
+                        LOG.debug("Unhandled certificate attribute - Type: {}, Value: {}", type, value);
+                }
+            }
+
+            SimpleDateFormat dateFormat = new SimpleDateFormat("dd/MM/yyyy");
+            String expires = dateFormat.format(cert.getNotAfter());
+
+            cards.add(new CardSignInfo(
+                CardSignInfo.PKCS11TYPE,
+                identification,
+                firstName,
+                lastName,
+                commonName,
+                organization,
+                expires,
+                cert.getSerialNumber().toString(16),
+                tokenSerial,
+                slot
+            ));
+
+        } catch (Exception e) {
+            LOG.warn("Failed to process certificate", e);
+        }
+    }
+
+    private byte[] getCertificateBytes(PKCS11Native pkcs11, long session, long object) {
+        PKCS11Native.CKAttribute[] template = PKCS11Native.CKAttribute.createTemplate(new PKCS11Native.CKAttribute(PKCS11Native.CKA_VALUE));
+
+        // Get certificate size
+        long rv = pkcs11.C_GetAttributeValue(session, object, template, template.length);
+        if (rv != 0) return null;
+
+        // Allocate memory and get actual certificate data
+        template[0].pValue = new Memory(template[0].ulValueLen);
+        rv = pkcs11.C_GetAttributeValue(session, object, template, template.length);
+        if (rv != 0) return null;
+
+        return template[0].pValue.getByteArray(0, (int) template[0].ulValueLen);
+    }
+
+    private void listAvailableProviders() {
+        LOG.debug("=== Available Security Providers ===");
+
+        // List all providers
+        for (Provider p : Security.getProviders()) {
+            LOG.debug(String.format("Provider: %s (version %.2f)", p.getName(), p.getVersion()));
+
+            // List all services for this provider
+            p.getServices().stream().filter(s -> s.getType().contains("PKCS11") || s.getAlgorithm().contains("PKCS11")).forEach(s -> LOG.debug(String.format("  - Type: %s, Algorithm: %s", s.getType(), s.getAlgorithm())));
+        }
+
+        // Specifically check for SunPKCS11 provider
+        Provider sunPkcs11 = Security.getProvider("SunPKCS11");
+        if (sunPkcs11 != null) {
+            LOG.debug("SunPKCS11 provider is available");
+            LOG.debug("Class: " + sunPkcs11.getClass().getName());
+        } else {
+            LOG.debug("SunPKCS11 provider is NOT available");
+        }
+
+        LOG.debug("===================================");
+    }
+
 
     @Override
     public void close() {
@@ -251,99 +447,4 @@ public class SmartCardDetector implements AutoCloseable {
             configFile.delete();
         }
     }
-//    public List<CardSignInfo> readListSmartCard() throws Throwable {
-//        List<CardSignInfo> cardinfo = new ArrayList();
-//        this.updateLib();
-//        String functionList = "C_GetFunctionList";
-//        CK_C_INITIALIZE_ARGS pInitArgs = new CK_C_INITIALIZE_ARGS();
-//
-//        PKCS11 pkcs11;
-//        try {
-//            pInitArgs.flags = 2L;
-//            pkcs11 = PKCS11.getInstance(this.lib, functionList, pInitArgs, false);
-//        } catch (PKCS11Exception e) {
-//            this.LOG.debug("C_GetFunctionList didn't like CKF_OS_LOCKING_OK on pInitArgs", e);
-//            pInitArgs.flags = 0L;
-//            pkcs11 = PKCS11.getInstance(this.lib, functionList, pInitArgs, false);
-//        }
-//
-//        CK_INFO info = pkcs11.C_GetInfo();
-//        this.LOG.info("Interface: " + (new String(info.libraryDescription)).trim());
-//        Boolean tokenPresent = true;
-//
-//        for (long slotID : pkcs11.C_GetSlotList(tokenPresent)) {
-//            CK_SLOT_INFO slotInfo = pkcs11.C_GetSlotInfo(slotID);
-//            this.LOG.debug("Slot " + slotID + ": " + (new String(slotInfo.slotDescription)).trim());
-//            if ((slotInfo.flags & 1L) != 0L) {
-//                try {
-//                    CK_TOKEN_INFO tokenInfo = pkcs11.C_GetTokenInfo(slotID);
-//                    this.LOG.info("Token: " + (new String(tokenInfo.label)).trim() + " (" + (new String(tokenInfo.serialNumber)).trim() + ")");
-//                    CK_ATTRIBUTE[] pTemplate = new CK_ATTRIBUTE[]{new CK_ATTRIBUTE(0L, 1L)};
-//                    long ulMaxObjectCount = 32L;
-//                    long hSession = pkcs11.C_OpenSession(slotID, 4L, (Object) null, (CK_NOTIFY) null);
-//                    pkcs11.C_FindObjectsInit(hSession, pTemplate);
-//                    long[] phObject = pkcs11.C_FindObjects(hSession, ulMaxObjectCount);
-//                    pkcs11.C_FindObjectsFinal(hSession);
-//
-//                    for (long object : phObject) {
-//                        CK_ATTRIBUTE[] pTemplate2 = new CK_ATTRIBUTE[]{new CK_ATTRIBUTE(17L), new CK_ATTRIBUTE(258L)};
-//                        pkcs11.C_GetAttributeValue(hSession, object, pTemplate2);
-//
-//                        for (int i = 0; i < pTemplate2.length; i += 2) {
-//                            X509Certificate certificate = (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(new ByteArrayInputStream((byte[]) pTemplate2[i].pValue));
-//                            boolean[] keyUsage = certificate.getKeyUsage();
-//                            if (certificate.getBasicConstraints() == -1 && keyUsage[0] && keyUsage[1]) {
-//                                LdapName ldapName = new LdapName(certificate.getSubjectX500Principal().getName("RFC1779"));
-//                                String firstName = "";
-//                                String lastName = "";
-//                                String identification = "";
-//                                String commonName = "";
-//                                String organization = "";
-//
-//                                for (Rdn rdn : ldapName.getRdns()) {
-//                                    if (rdn.getType().equals("OID.2.5.4.5")) {
-//                                        identification = rdn.getValue().toString();
-//                                    }
-//
-//                                    if (rdn.getType().equals("OID.2.5.4.4")) {
-//                                        lastName = rdn.getValue().toString();
-//                                    }
-//
-//                                    if (rdn.getType().equals("OID.2.5.4.42")) {
-//                                        firstName = rdn.getValue().toString();
-//                                    }
-//
-//                                    if (rdn.getType().equals("CN")) {
-//                                        commonName = rdn.getValue().toString();
-//                                    }
-//
-//                                    if (rdn.getType().equals("O")) {
-//                                        organization = rdn.getValue().toString();
-//                                    }
-//                                }
-//
-//                                String expires = (new SimpleDateFormat("yyyy-MM-dd")).format(certificate.getNotAfter());
-//                                this.LOG.debug(firstName + " " + lastName + " (" + identification + "), " + organization + ", " + certificate.getSerialNumber().toString(16) + " [Token serial number: " + new String(tokenInfo.serialNumber) + "] (Expires: " + expires + ")");
-//                                Object keyIdentifier = pTemplate2[i + 1];
-//                                this.LOG.debug("Public/Private key pair identifier: " + keyIdentifier);
-//                                cardinfo.add(new CardSignInfo(CardSignInfo.PKCS11TYPE, identification, firstName, lastName, commonName, organization, expires, certificate.getSerialNumber().toString(16), new String(tokenInfo.serialNumber), slotID));
-//                            }
-//                        }
-//                    }
-//
-//                    pkcs11.C_CloseSession(hSession);
-//                } catch (PKCS11Exception e) {
-//                    if (!e.getLocalizedMessage().equals("CKR_TOKEN_NOT_RECOGNIZED")) {
-//                        throw e;
-//                    }
-//
-//                    this.LOG.info("Slot reports token is present but not recognized by the cryptoki library", e);
-//                }
-//            } else {
-//                this.LOG.info("No token present in this slot");
-//            }
-//        }
-//
-//        return cardinfo;
-//    }
 }

@@ -9,6 +9,7 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.util.StringUtils;
 
 import java.io.File;
 import java.security.KeyStore;
@@ -24,7 +25,7 @@ public class FirmadorPocApplication {
     @Bean
     public CommandLineRunner commandLineRunner() {
         return args -> {
-            if (args.length < 2) {
+            if (args.length < 1) {
                 System.out.println("Usage: java -jar firmador.jar <command> <pin> [options]");
                 System.out.println("Commands:");
                 System.out.println("  list-cards    - List available smart cards");
@@ -63,8 +64,15 @@ public class FirmadorPocApplication {
     private void listSmartCards(String... args) throws Throwable {
         try (SmartCardDetector detector = new SmartCardDetector()) {
             // Create detector with PIN
-            String pin = args[1];
-            CardSignInfo pinInfo = new CardSignInfo(new KeyStore.PasswordProtection(pin.toCharArray()));
+            String pin = args.length > 1 ? args[1] : null;
+            CardSignInfo pinInfo;
+
+            if (StringUtils.hasText(pin)) {
+                pinInfo = new CardSignInfo(new KeyStore.PasswordProtection(pin.toCharArray()));
+            } else {
+                pinInfo = new CardSignInfo();
+            }
+
 
             // Get available cards
             List<CardSignInfo> cards = detector.readSaveListSmartCard(pinInfo);
