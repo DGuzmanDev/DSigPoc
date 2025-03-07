@@ -47,7 +47,7 @@ public class OfficeDocumentDebugger {
                             // For XML files, log their content for easier debugging
                             if (entryName.endsWith(".xml") || entryName.endsWith(".rels")) {
                                 String content = new String(Files.readAllBytes(targetPath), "UTF-8");
-                                LOG.info("Content of {}: \n{}", entryName, content);
+//                                LOG.info("Content of {}: \n{}", entryName, content);
                             }
                         }
                     }

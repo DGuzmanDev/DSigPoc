@@ -100,22 +100,11 @@ public class Settings {
     }
 
     public SignatureLevel getXAdESLevel() {
-        SignatureLevel level = SignatureLevel.XAdES_BASELINE_LTA;
-        switch (this.xAdESLevel) {
-            case "T":
-                level = SignatureLevel.XAdES_BASELINE_T;
-                break;
-            case "LT":
-                level = SignatureLevel.XAdES_BASELINE_LT;
-                break;
-            case "LTA":
-                level = SignatureLevel.XAdES_BASELINE_LTA;
-                break;
-            default:
-                level = SignatureLevel.XAdES_BASELINE_LTA;
-        }
-
-        return level;
+        return switch (this.xAdESLevel) {
+            case "T" -> SignatureLevel.XAdES_BASELINE_T;
+            case "LT" -> SignatureLevel.XAdES_BASELINE_LT;
+            default -> SignatureLevel.XAdES_BASELINE_LTA;
+        };
     }
 
     public void addListener(ConfigListener toAdd) {

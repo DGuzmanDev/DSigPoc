@@ -135,7 +135,7 @@ public class FirmadorWord extends CRSigner implements AutoCloseable {
 
             // Initialize signature parameters
             this.parameters = new XAdESSignatureParameters();
-            this.parameters.setSignatureLevel(SignatureLevel.XAdES_BASELINE_B);
+            this.parameters.setSignatureLevel(this.settings.getXAdESLevel());
             this.parameters.setSignaturePackaging(SignaturePackaging.DETACHED);
             this.parameters.setDigestAlgorithm(DigestAlgorithm.SHA256);
 
