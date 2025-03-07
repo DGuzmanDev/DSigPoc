@@ -292,7 +292,9 @@ public class SmartCardDetector implements AutoCloseable {
                 // For signing with PKCS11 we do not need these details.
 
 
-                //IMPORTANTE: EL SLOT ID SI SE NECESITA.
+                //TODO: Este proceso solo es valido para slots unicos, es decir, solo 1 tarjeta.
+                //Para que sea mas amplio hay que usar low level API como con los public certs para obtener el token serial number (serial de la tarjeta) y el slot number
+                //Se usa principalmente para
                 CardSignInfo info = new CardSignInfo(CardSignInfo.PKCS11TYPE, identification, firstName, lastName, commonName,
                         organization, expires, serialNumber, "Unknown", 0L);
 

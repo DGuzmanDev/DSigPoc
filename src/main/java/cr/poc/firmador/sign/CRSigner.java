@@ -105,6 +105,8 @@ public class CRSigner {
                 // In this case the CardSignInfo.getTokenSerialNumber actually has a file absolute path to an PKCS12 key store
                 signingToken = new Pkcs12SignatureToken(card.getTokenSerialNumber(), card.getPin());
             } else {
+                //TODO: Hacer dinamico el slot #, este mae sigue siendo "quemado" por el high level API
+                // ero se puede lograr con el approach de los public certs usando JNA
                 signingToken = new Pkcs11SignatureToken(getPkcs11Lib(), card.getPin(), (int) card.getSlotID());
             }
         } catch (Throwable e) {
@@ -128,7 +130,7 @@ public class CRSigner {
 
     public CertificateVerifier getCertificateVerifier() {
         //For debugging
-        listAvailableCertificates();
+//        listAvailableCertificates();
 
         CertificateSource trustedCertSource = new CommonTrustedCertificateSource();
 
